@@ -96,11 +96,21 @@ python -m backend.utils.model_manager   # download models
 # API docs at http://localhost:8000/docs
 ```
 
+```
+source .venv/bin/activate
+uvicorn backend.app:app --host 0.0.0.0 --port 8000
+```
+
 ### 3. Run the frontend (in a second terminal)
 
 ```bash
 ./run_frontend.sh
 # UI at http://localhost:8501
+```
+
+```
+source .venv/bin/activate
+streamlit run frontend/streamlit_app.py
 ```
 
 ---
