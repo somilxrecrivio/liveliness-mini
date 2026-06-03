@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Models (downloaded at setup time)
+backend/models/*.task
+backend/models/*.tflite
+backend/models/insightface/
+
+# Logs
+logs/
+*.log
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
