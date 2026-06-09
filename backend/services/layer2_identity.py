@@ -63,6 +63,27 @@ def _robust_embedding(img: np.ndarray, face) -> np.ndarray:
     return l2_normalize(mean)
 
 
+def _periocular_embedding(img: np.ndarray, face) -> np.ndarray:
+    """Age-stable embedding from the periocular (eye/brow) region.
+
+    With a large age gap the lower face (jaw/chin/mouth) matures and drags the
+    whole-face ArcFace cosine below threshold, even for the same person. The
+    periocular region changes far less, so it provides a second corroborating
+    channel. We crop the top ``periocular_crop_fraction`` rows of the canonical
+    112x112 aligned face, resize back to 112x112, and embed it with horizontal
+    -flip TTA (2 views), then L2-normalise and average.
+    """
+    aligned = get_aligned_face(img, face, size=112)
+    rows = max(1, min(112, int(round(112 * settings.periocular_crop_fraction))))
+    crop = aligned[:rows, :, :]
+    crop = cv2.resize(crop, (112, 112), interpolation=cv2.INTER_CUBIC)
+    views = [crop, cv2.flip(crop, 1)]
+    feats = embed_aligned(views)  # (2, 512), batched
+    embs = [l2_normalize(f) for f in np.asarray(feats)]
+    mean = np.mean(np.stack(embs, axis=0), axis=0)
+    return l2_normalize(mean)
+
+
 def _geometry_features(face) -> np.ndarray | None:
     """Stable geometric ratios from the 5 landmark keypoints.
 
@@ -148,6 +169,12 @@ def verify_identity(reference_img: np.ndarray, probe_img: np.ndarray) -> Identit
     probe_emb = _robust_embedding(probe_img, probe_face)
     similarity = cosine_similarity(ref_emb, probe_emb)
 
+    # Age-stable periocular (eye-region) channel — corroborating evidence for
+    # large age-gap pairs whose lower face has matured.
+    ref_peri = _periocular_embedding(reference_img, ref_face)
+    probe_peri = _periocular_embedding(probe_img, probe_face)
+    periocular_sim = cosine_similarity(ref_peri, probe_peri)
+
     ref_bbox = tuple(int(v) for v in ref_face.bbox)
     probe_bbox = tuple(int(v) for v in probe_face.bbox)
     ref_q = assess_quality(reference_img, ref_bbox).overall
@@ -158,21 +185,36 @@ def verify_identity(reference_img: np.ndarray, probe_img: np.ndarray) -> Identit
     landmark_score = _landmark_stability(ref_face, probe_face)
 
     # Multi-signal decision: a direct embedding pass, or a borderline embedding
-    # corroborated by strongly consistent facial geometry (age-stable). Impostors
-    # score far below this band (≈0.15), so corroboration stays low-risk.
+    # corroborated by an age-stable channel — consistent facial geometry, or a
+    # strong periocular (eye-region) match. Both gates are strict conjunctions
+    # kept above the impostor band (≈0.15), so corroboration stays low-risk and
+    # the global threshold is never lowered.
     match = similarity >= threshold
-    corroborated = (
+    geom_corroborated = (
         not match
         and similarity >= max(0.33, threshold - 0.06)
         and landmark_score >= 72.0
     )
-    if corroborated:
+    # Periocular channel: the lower face matured (full-face cosine dropped) but
+    # the age-stable eye region still matches clearly above the full-face score.
+    peri_corroborated = (
+        not match
+        and similarity >= settings.similarity_threshold_low - 0.04
+        and periocular_sim >= settings.periocular_match_threshold
+        and periocular_sim >= similarity + settings.periocular_margin
+    )
+    if geom_corroborated or peri_corroborated:
         match = True
 
     # Threshold-relative score: a genuine match *at* the (quality-adaptive)
     # threshold should already read as a solid pass, scaling up with margin.
-    # This stops degraded-but-genuine ID matches from being unfairly low.
-    delta = similarity - threshold
+    # This stops degraded-but-genuine ID matches from being unfairly low. When
+    # the periocular channel carries the decision, credit it so the genuine
+    # match doesn't read as a borderline score.
+    effective_sim = similarity
+    if peri_corroborated:
+        effective_sim = max(similarity, 0.6 * similarity + 0.4 * periocular_sim)
+    delta = effective_sim - threshold
     if delta >= 0:
         sim_component = clamp(65.0 + linear_map(delta, 0.0, 0.20, 0.0, 35.0))
     else:
@@ -181,10 +223,16 @@ def verify_identity(reference_img: np.ndarray, probe_img: np.ndarray) -> Identit
         0.70 * sim_component + 0.20 * landmark_score + 0.10 * quality_score
     )
 
-    if corroborated:
+    if geom_corroborated:
         reasons.append(
             f"Borderline embedding similarity {similarity:.2f} confirmed by consistent "
             f"facial geometry (age-stable) — accepted."
+        )
+    elif peri_corroborated:
+        reasons.append(
+            f"Borderline full-face similarity {similarity:.2f} confirmed by a strong "
+            f"age-stable periocular (eye-region) match {periocular_sim:.2f} — consistent "
+            f"with the same person across a large age gap."
         )
     elif match:
         reasons.append(f"Strong embedding match (similarity {similarity:.2f} >= {threshold:.2f}).")
@@ -198,8 +246,8 @@ def verify_identity(reference_img: np.ndarray, probe_img: np.ndarray) -> Identit
         reasons.append("Facial geometry differs notably between images.")
 
     logger.info(
-        "Layer2 identity_score={:.1f} sim={:.3f} thr={:.3f} match={} geom={:.1f} q={:.1f}",
-        identity_score, similarity, threshold, match, landmark_score, quality_score,
+        "Layer2 identity_score={:.1f} sim={:.3f} peri={:.3f} thr={:.3f} match={} geom={:.1f} q={:.1f}",
+        identity_score, similarity, periocular_sim, threshold, match, landmark_score, quality_score,
     )
 
     return IdentityResult(

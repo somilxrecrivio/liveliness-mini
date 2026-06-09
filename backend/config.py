@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     similarity_threshold_high: float = Field(default=0.40)
     similarity_threshold_low: float = Field(default=0.30)
 
+    # ---- Periocular (age-stable eye-region) corroboration ----
+    # Large age gaps mature the jaw/mouth and drag whole-face cosine below the
+    # threshold even for genuine pairs; the eye/brow region stays stable. A
+    # strict periocular gate adds corroborating evidence WITHOUT lowering the
+    # global similarity threshold (so impostor rejection is preserved).
+    periocular_crop_fraction: float = Field(default=0.55)
+    periocular_match_threshold: float = Field(default=0.42)
+    periocular_margin: float = Field(default=0.08)
+
     # ---- Final weights ----
     weight_capture: float = Field(default=0.20)
     weight_identity: float = Field(default=0.35)
